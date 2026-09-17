@@ -513,8 +513,10 @@ async function onSignedIn(idToken){
     ID_TOKEN=null;
     const m=String((e&&e.message)||e);
     box.style.display="none";
-    renderSignIn(m.indexOf("domain")>=0 ? "학교 계정으로만 이용할 수 있습니다. 학교 계정으로 다시 로그인해 주세요."
-      : "로그인 확인에 실패했습니다. 다시 시도해 주세요.");
+    const dom=(window.BUS_CONFIG&&window.BUS_CONFIG.allowedDomain)||"";
+    renderSignIn(m.indexOf("domain")>=0
+      ? "학교 계정"+(dom?"(@"+dom+")":"")+"으로만 이용할 수 있습니다. 학교 계정으로 다시 로그인해 주세요."
+      : "로그인 확인에 실패했습니다. 다시 시도해 주세요. (코드: "+m.replace(/^Error:\s*/,"")+")");
   }
 }
 
