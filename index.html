@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#2456d8" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="통학버스" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png" />
+<!-- 외부 호스팅 빌드 전용: google.script.run 을 GAS 웹앱 API 호출로 대체 -->
+<script src="config.js"></script>
+<script>
+(function(){
+  var CFG = window.BUS_CONFIG || {};
+
+  function call(fn, args){
+    if(!CFG.gasUrl || CFG.gasUrl.indexOf('여기에_배포ID')>=0){
+      return Promise.reject(new Error('config.js 의 gasUrl 을 먼저 설정해 주세요.'));
+    }
+    // Content-Type 을 text/plain 으로 보내야 프리플라이트(OPTIONS) 없이 통과한다.
+    // GAS 는 OPTIONS 요청에 응답하지 못하므로 application/json 으로 보내면 CORS 에 막힌다.
+    return fetch(CFG.gasUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({fn:fn, args:args}),
+      redirect:'follow'
+    }).then(function(r){ return r.json(); }).then(function(j){
+      if(!j || !j.ok) throw new Error((j && j.error) || 'api_error');
+      return j.result;
+    });
+  }
+
+  var run = {
+    _s:null, _f:null,
+    withSuccessHandler:function(fn){ this._s=fn; return this; },
+    withFailureHandler:function(fn){ this._f=fn; return this; }
+  };
+
+  ['getMeta','getBusLive','lookup','confirmBoard','getRegistration','saveRegistration',
+   'savePushToken','deletePushToken'].forEach(function(name){
+    run[name]=function(){
+      var args=[].slice.call(arguments), s=this._s, f=this._f;
+      call(name,args).then(function(res){ if(s) s(res); }).catch(function(err){ if(f) f(err); });
+    };
+  });
+
+  // 관리자 기능은 공개 사이트에서 제공하지 않는다(관리자 PIN을 외부로 내보내지 않기 위해).
+  // 좌표 조정·경유지 편집·명단 보기는 학교 내부 GAS 화면에서만 사용.
+  ['adminCheck','adminSaveCoord','adminSaveVia','adminRoster'].forEach(function(name){
+    run[name]=function(){
+      var f=this._f;
+      setTimeout(function(){ if(f) f({message:'관리자 기능은 학교 내부(Apps Script) 화면에서만 사용합니다.'}); },0);
+    };
+  });
+
+  window.google = { script: { run: run } };
+})();
+</script>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root{--panel:#fff;--ink:#1f2933;--muted:#6b7280;--line:#e5e7eb}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:"Malgun Gothic","맑은 고딕",system-ui,sans-serif;color:var(--ink)}
+  #app{display:flex;height:100vh;width:100vw;overflow:hidden}
+  #side{width:350px;flex:0 0 350px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+  #side header{padding:14px 18px 10px;border-bottom:1px solid var(--line)}
+  #side header h1{margin:0;font-size:16px;line-height:1.35}
+  #side header p{margin:5px 0 0;font-size:12px;color:var(--muted)}
+  .dirtabs{display:flex;gap:6px;margin-top:10px}
+  .dirtabs button{flex:1;padding:9px 0;border:1px solid #cbd5e1;background:#fff;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;color:#64748b}
+  .dirtabs button.on{background:#2456d8;border-color:#2456d8;color:#fff}
+  .dirnote{font-size:11.5px;color:var(--muted);margin-top:7px}
+  .finder{padding:12px 16px;border-bottom:1px solid var(--line);background:#f8fafc}
+  .finder h3{margin:0 0 8px;font-size:14px}
+  .finder .row{display:flex;gap:6px}
+  .finder input{flex:1;min-width:0;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px}
+  .finder button{padding:8px 12px;border:0;background:#2456d8;color:#fff;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap}
+  .finder .hint{font-size:11px;color:var(--muted);margin-top:6px}
+  .finder .result{margin-top:10px;padding:10px 12px;border-radius:10px;font-size:13px;display:none;line-height:1.5}
+  .finder .result.ok{display:block;background:#ecfdf5;border:1px solid #a7f3d0}
+  .finder .result.err{display:block;background:#fef2f2;border:1px solid #fecaca}
+  #routes{overflow-y:auto;flex:1;padding:8px 10px 20px}
+  .route{border:1px solid var(--line);border-radius:12px;margin:8px 4px;overflow:hidden}
+  .route h2{margin:0;font-size:14px;padding:10px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;background:#fafafa}
+  .route h2 .dot{width:12px;height:12px;border-radius:50%;flex:0 0 12px}
+  .route h2 .meta{margin-left:auto;font-size:11.5px;color:var(--muted);font-weight:400}
+  .stops{list-style:none;margin:0;padding:0;display:none}
+  .route.open .stops{display:block}
+  .stops li{padding:8px 12px 8px 34px;border-top:1px solid var(--line);font-size:13px;cursor:pointer}
+  .stops li:hover{background:#f5f7ff}
+  .stops li.hl{background:#fff7ed;box-shadow:inset 3px 0 0 #f08c00}
+  .stops li .nm{font-weight:600}
+  .stops li .sub{color:var(--muted);font-size:11.5px;margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
+  .badge{display:inline-block;background:#eef2ff;color:#3743d0;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:600}
+  .tm{color:#0f766e;font-weight:600}
+  .eta{color:#b45309;font-weight:600}
+  #map{flex:1;height:100%}
+  .marker-num{border-radius:50%;color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.4);border:2px solid #fff;font-size:12px}
+  .marker-num.hl{animation:pulse 1s ease-in-out 3;border:3px solid #f08c00}
+  @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.35)}}
+  .school-ic{background:#111;color:#fff;border:2px solid #fff;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 1px 5px rgba(0,0,0,.5)}
+  .leaflet-popup-content{font-size:13px;line-height:1.5;margin:10px 12px}
+  .pop-t{margin-top:6px;padding-top:6px;border-top:1px dashed #ddd}
+  .legend{position:absolute;right:12px;bottom:12px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12px;z-index:500;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+  .legend div{display:flex;align-items:center;gap:8px;margin:3px 0}
+  .legend .dot{width:14px;height:4px;border-radius:2px}
+  #overlay{position:absolute;inset:0;background:rgba(255,255,255,.92);z-index:1000;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;text-align:center;padding:20px}
+  #overlay .bar{width:min(420px,80vw);height:8px;background:#eee;border-radius:8px;overflow:hidden}
+  #overlay .bar>i{display:block;height:100%;width:0;background:#2456d8;transition:width .3s}
+  #overlay .sub{font-size:12px;color:var(--muted);max-width:460px}
+  .apbtn{font-size:11.5px;padding:5px 9px;border:1px solid var(--line);background:#fff;border-radius:7px;cursor:pointer}
+  .apbtn:hover{background:#f3f4f6}
+  /* 제작자 표기 */
+  .credit{flex:0 0 auto;padding:12px 16px 14px;text-align:center}
+  .credit-line{display:block;width:44px;height:3px;margin:0 auto 8px;border-radius:3px;
+    background:linear-gradient(90deg,#e6194B,#2456d8,#2f9e44,#f08c00)}
+  .credit-txt{font-size:11.5px;color:#94a3b8;letter-spacing:.2px}
+  .credit-txt b{color:#475569;font-weight:700}
+  /* 모바일: 목록/지도 전체화면 전환 탭 */
+  #mobileTabs{display:none;position:fixed;bottom:0;left:0;right:0;height:52px;z-index:1400;background:#fff;border-top:1px solid var(--line);box-shadow:0 -2px 8px rgba(0,0,0,.06)}
+  #mobileTabs button{flex:1;border:0;background:#fff;font-size:14.5px;font-weight:700;color:#94a3b8;cursor:pointer}
+  #mobileTabs button.on{color:#2456d8}
+  #mobileTabs button.on span{border-bottom:3px solid #2456d8;padding-bottom:4px}
+  @media(max-width:760px){
+    #app{flex-direction:column}
+    #side{width:100%;flex:1 1 auto;height:calc(100vh - 52px);border-right:none;border-bottom:none}
+    #map{height:calc(100vh - 52px)}
+    #mobileTabs{display:flex}
+    body.m-map #side{display:none}
+    body.m-list #map{display:none}
+    body.m-list .legend{display:none}
+  }
+
+  /* ==================================================================
+     Apple-inspired refinement — apple-design 스킬(emilkowalski, MIT) 반영
+     · 시스템 타이포(음수 트래킹) · 반투명 머티리얼/깊이 · 눌림 피드백
+     · 스프링 이징 · reduced-motion / transparency / contrast 대응
+     ================================================================== */
+  :root{ --ink:#1d1d1f; --muted:#6e6e73; --line:#e6e6ea; --accent:#0a84ff;
+    --ease-spring:cubic-bezier(.32,.72,0,1); --glass:saturate(180%) blur(20px); }
+  body{ font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Malgun Gothic","맑은 고딕",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+  #side{ background:#fbfbfd; }
+  #side header{ background:rgba(251,251,253,.82); -webkit-backdrop-filter:var(--glass); backdrop-filter:var(--glass); }
+  #side header h1{ letter-spacing:-.022em; font-weight:800; }
+  #side header p,.finder .hint,.dirnote{ letter-spacing:-.01em; }
+  /* iOS 세그먼트 컨트롤 느낌의 등교/하교 */
+  .dirtabs{ background:#ececf0; border-radius:13px; padding:3px; gap:0; }
+  .dirtabs button{ border:0; border-radius:10px; background:transparent; color:#3a3a3c;
+    transition:background .28s var(--ease-spring), color .2s ease, transform .12s var(--ease-spring); }
+  .dirtabs button.on{ background:#fff; color:var(--accent);
+    box-shadow:0 1px 3px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04); }
+  .dirtabs button:active{ transform:scale(.97); }
+  /* 즉각적 눌림 피드백(Response 원칙) */
+  .finder button,.apbtn,#mobileTabs button,.rm-head button,.stops li,.route h2{
+    transition:transform .12s var(--ease-spring), background .2s ease, box-shadow .3s ease, filter .2s ease; }
+  .finder button:active,.apbtn:active,#mobileTabs button:active{ transform:scale(.96); }
+  .stops li:active{ transform:scale(.99); }
+  .finder{ background:rgba(248,249,252,.78); -webkit-backdrop-filter:var(--glass); backdrop-filter:var(--glass); }
+  .finder input,.finder button{ border-radius:12px; }
+  .finder button{ background:var(--accent); }
+  .finder input:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,132,255,.18); }
+  .result{ border-radius:14px; }
+  /* 카드/목록 (Craft·Simplicity) */
+  .route{ border-radius:16px; box-shadow:0 1px 2px rgba(0,0,0,.05); }
+  .route h2{ background:transparent; }
+  .badge{ border-radius:999px; }
+  /* 지도 위에 뜨는 반투명 크롬(Materials & depth) */
+  .legend,#adminPanel,#mobileTabs,.rm-box,#toast{ -webkit-backdrop-filter:var(--glass); backdrop-filter:var(--glass); }
+  .legend{ background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.5); border-radius:16px;
+    box-shadow:0 8px 30px rgba(0,0,0,.14); }
+  #adminPanel{ background:rgba(255,255,255,.84); border-radius:16px; }
+  #mobileTabs{ background:rgba(255,255,255,.84); }
+  #toast{ background:rgba(20,20,22,.86); border-radius:14px; }
+  .leaflet-popup-content-wrapper{ border-radius:16px !important; box-shadow:0 10px 34px rgba(0,0,0,.18) !important; }
+  .leaflet-popup-tip{ box-shadow:none !important; }
+  .marker-num{ box-shadow:0 2px 8px rgba(0,0,0,.28); }
+  /* 모달: 트리거에서 자라나듯(Spatial consistency·Materialize) */
+  .rm-box{ border-radius:20px; animation:rmIn .4s var(--ease-spring); }
+  @keyframes rmIn{ from{ opacity:0; transform:scale(.94) translateY(8px); } to{ opacity:1; transform:none; } }
+  #overlay .bar>i{ transition:width .4s var(--ease-spring); }
+  /* 접근성 — reduced motion / transparency / contrast */
+  @media (prefers-reduced-motion: reduce){
+    *{ animation-duration:.001ms !important; transition-duration:.06ms !important; }
+    .marker-num.hl{ animation:none; }
+  }
+  @media (prefers-reduced-transparency: reduce){
+    #side header,.finder,.legend,#adminPanel,#mobileTabs,.rm-box{ backdrop-filter:none; -webkit-backdrop-filter:none; background:#fff; }
+    #toast{ background:#141416; }
+  }
+  @media (prefers-contrast: more){
+    :root{ --line:#c7c7cc; }
+    .legend,#adminPanel{ border:1px solid #c7c7cc; background:#fff; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <header>
+      <h1>🚌 한국글로벌중학교 통학버스</h1>
+      <p>2026학년도 1학기 · 4개 노선</p>
+      <div class="dirtabs">
+        <button id="tabGo" class="on" data-dir="going">🌅 등교</button>
+        <button id="tabCome" data-dir="coming">🏫 하교</button>
+      </div>
+      <div class="dirnote" id="dirNote"></div>
+      <button id="adminBtn" style="margin-top:6px;font-size:11px;background:none;border:0;color:#94a3b8;cursor:pointer;padding:0">🔧 관리자</button>
+    </header>
+    <div class="finder">
+      <h3>🔔 버스 도착 알림 받기</h3>
+      <div class="hint" id="signHint">내가 타는 노선·정류장을 정해두면, 버스가 그 정류장에 가까워질 때
+        <b>"잠시 후 버스가 도착합니다"</b> 알림을 보내드립니다.</div>
+      <div id="signInBox" style="margin-top:8px"></div>
+      <div class="result" id="fResult"></div>
+    </div>
+    <div id="routes"></div>
+    <div class="credit">
+      <span class="credit-line"></span>
+      <span class="credit-txt">제작 · 미래교육부장 교사 <b>이종석</b></span>
+    </div>
+  </aside>
+  <div id="map"></div>
+  <div class="legend" id="legend"></div>
+  <div id="toast" style="position:absolute;left:50%;bottom:22px;transform:translateX(-50%);background:#111;color:#fff;padding:9px 16px;border-radius:9px;font-size:13px;z-index:1200;display:none;box-shadow:0 3px 12px rgba(0,0,0,.3)"></div>
+  <div id="adminPanel" style="position:absolute;left:12px;top:12px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:11px 13px;z-index:600;box-shadow:0 3px 12px rgba(0,0,0,.16);font-size:12.5px;display:none;max-width:270px">
+    <b>🔧 관리자 편집 모드</b>
+    <div style="color:#6b7280;margin:5px 0 8px">정류장 핀을 <b>드래그</b>하면 위치가 자동 저장됩니다.</div>
+    <div style="border-top:1px solid #eee;padding-top:8px">
+      <div style="font-weight:600;margin-bottom:5px">경유지 (고속도로 회피)</div>
+      <select id="viaRoute" style="width:100%;padding:5px;margin-bottom:6px"></select>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">
+        <button id="viaEdit" class="apbtn">경유지 표시</button>
+        <button id="viaAdd" class="apbtn">＋ 추가</button>
+        <button id="viaSave" class="apbtn">💾 저장</button>
+        <button id="viaClear" class="apbtn">비우기</button>
+      </div>
+      <div style="color:#6b7280;margin-top:5px">경유지를 지도의 일반도로 위에 놓으면 그 길로 우회합니다.</div>
+    </div>
+    <div style="border-top:1px solid #eee;margin-top:8px;padding-top:8px;display:flex;gap:5px">
+      <button id="applyBtn" class="apbtn" style="background:#2456d8;color:#fff;border-color:#2456d8">↻ 경로 재계산</button>
+      <button id="adminExit" class="apbtn">나가기</button>
+    </div>
+  </div>
+  <div id="mobileTabs">
+    <button id="mtList" class="on"><span>📋 목록·알림</span></button>
+    <button id="mtMap"><span>🗺 지도</span></button>
+  </div>
+  <div id="overlay">
+    <div class="msg" id="ovMsg">지도를 준비하는 중입니다…</div>
+    <div class="bar"><i id="ovBar"></i></div>
+    <div class="sub">정류장 위치와 실제 도로 경로·소요시간을 계산합니다.</div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+function gcall(fn){var a=[].slice.call(arguments,1);return new Promise(function(res,rej){
+  google.script.run.withSuccessHandler(res).withFailureHandler(rej)[fn].apply(google.script.run,a);});}
+
+let META=null, SCHOOL=null, schoolLatLng=null, activeDir="going";
+let adminMode=false, adminPin="", viaMarkers=[];
+const built={going:false,coming:false};
+const layers={going:{},coming:{}};      // dir -> routeId -> layerGroup
+const markers={going:{},coming:{}};      // dir -> key -> marker
+const SIHEUNG={minLat:37.33,maxLat:37.50,minLng:126.72,maxLng:126.88};
+const map=L.map("map",{zoomControl:true}).setView([37.4265,126.8250],13);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap 기여자"}).addTo(map);
+
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const inSiheung=(a,b)=>a>=SIHEUNG.minLat&&a<=SIHEUNG.maxLat&&b>=SIHEUNG.minLng&&b<=SIHEUNG.maxLng;
+const cnt=s=>(s.count||0);   // 알림 구독자 수 (명단이 없으므로 실제 탑승 인원이 아님)
+const fmtMin=s=>s==null?"계산 불가":"약 "+Math.round(s/60)+"분";
+function haversine(a,b){const R=6371000,t=Math.PI/180,dLat=(b[0]-a[0])*t,dLng=(b[1]-a[1])*t;
+  const s=Math.sin(dLat/2)**2+Math.cos(a[0]*t)*Math.cos(b[0]*t)*Math.sin(dLng/2)**2;return 2*R*Math.asin(Math.sqrt(s));}
+const setProgress=(p,m)=>{document.getElementById("ovBar").style.width=(p*100).toFixed(0)+"%";if(m)document.getElementById("ovMsg").textContent=m;};
+const showOverlay=on=>document.getElementById("overlay").style.display=on?"flex":"none";
+
+const geoCache={};
+async function geocode(qs){
+  for(const q of qs){
+    if(geoCache[q]!==undefined){if(geoCache[q])return geoCache[q];else continue;}
+    try{
+      const url="https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kr&viewbox=126.72,37.50,126.88,37.33&bounded=1&q="+encodeURIComponent(q);
+      const r=await fetch(url,{headers:{"Accept-Language":"ko"}}); await sleep(1100);
+      if(!r.ok){geoCache[q]=null;continue;}
+      const a=await r.json();
+      if(a&&a.length){const lat=parseFloat(a[0].lat),lng=parseFloat(a[0].lon);if(inSiheung(lat,lng)){geoCache[q]=[lat,lng];return[lat,lng];}}
+      geoCache[q]=null;
+    }catch(e){geoCache[q]=null;await sleep(300);}
+  }
+  return null;
+}
+function goodLL(ll){ return ll && ll[0]>33 && ll[0]<39 && ll[1]>124 && ll[1]<132; }  // 한국 범위(0,0 등 오류 배제)
+async function resolveLL(s){ if(goodLL(s.ll)) return s.ll; return await geocode(s.q) || s.fb; }  // 정확좌표(API) 우선
+async function osrmRoute(wp,opts={}){
+  const coords=wp.map(p=>p[1]+","+p[0]).join(";");
+  let url="https://router.project-osrm.org/route/v1/driving/"+coords+"?overview=full&geometries=geojson&annotations=duration";
+  if(opts.exclude)url+="&exclude="+encodeURIComponent(opts.exclude);
+  const r=await fetch(url); if(!r.ok)throw new Error("OSRM "+r.status);
+  const j=await r.json(); if(!j.routes||!j.routes.length)throw new Error("no route");
+  return {geometry:j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]), legDur:(j.routes[0].legs||[]).map(l=>l.duration)};
+}
+const numIcon=(color,txt,size=28,hl=false)=>L.divIcon({className:"",html:`<div class="marker-num${hl?" hl":""}" style="background:${color};width:${size}px;height:${size}px">${txt}</div>`,iconSize:[size,size],iconAnchor:[size/2,size/2]});
+const schoolIcon=()=>L.divIcon({className:"",html:`<div class="school-ic" style="width:34px;height:34px">🏫</div>`,iconSize:[34,34],iconAnchor:[17,17]});
+
+// ---- 초기화: 메타 + 학교 + 등교 방향 --------------------------------
+async function init(){
+  META=await gcall("getMeta"); SCHOOL=META.school;
+  setProgress(0.05,"학교 위치 확인 중…");
+  schoolLatLng=await resolveLL(SCHOOL);
+  const sm=L.marker(schoolLatLng,{icon:schoolIcon(),zIndexOffset:1000}).addTo(map);
+  sm.bindPopup(`<b>🏫 ${SCHOOL.name}</b><br>모든 노선의 도착지/출발지`);
+  await buildDirection("going");
+  Object.keys(layers.going).forEach(function(rid){ layers.going[rid].addTo(map); });  // 첫 화면에 노선 표시
+  showOverlay(false);
+  renderPanel(); updateLegend(); updateDirNote();
+  fitActive();
+  startBusPolling();   // 실시간 버스 위치 표시 시작
+}
+
+function stopsOf(route,dir){ return dir==="going"?route.going:route.coming; }
+function keyOf(dir,route,s){ return dir==="going" ? s.code : ("c"+route.id+"-"+s.seq); }
+
+// ---- 한 방향(등교/하교) 지도 구성 -----------------------------------
+async function buildDirection(dir){
+  if(built[dir]) return;
+  showOverlay(true); setProgress(0.05, dir==="going"?"등교 노선 준비 중…":"하교 노선 준비 중…");
+  const routes=META.routes;
+  const totalStops=routes.reduce((n,r)=>n+stopsOf(r,dir).length,0); let done=0;
+  // 좌표 확보
+  for(const r of routes)for(const s of stopsOf(r,dir)){
+    setProgress(0.05+0.55*(done/totalStops), `정류장 위치 확인 (${done+1}/${totalStops})`);
+    s._ll=await resolveLL(s); done++;
+  }
+  // 노선별 경로/시간
+  let ri=0;
+  for(const r of routes){
+    ri++; setProgress(0.6+0.35*(ri/routes.length), `${r.name} 경로 계산 중…`);
+    const lg=L.layerGroup(); layers[dir][r.id]=lg;
+    const stops=stopsOf(r,dir);
+    const viaPts=(r.via||[]);          // 경유지(고속도로 회피 등) — 학교 인접 구간에 삽입
+    const viaCount=viaPts.length;
+    // 등교: [정류장..., (경유지), 학교] / 하교: [학교, (경유지 역순), 정류장...]
+    const wpts = dir==="going" ? stops.map(s=>s._ll).concat(viaPts,[schoolLatLng])
+                               : [schoolLatLng].concat(viaPts.slice().reverse(), stops.map(s=>s._ll));
+    let geometry=null,legDur=null;
+    try{const rr=await osrmRoute(wpts,r.avoid?{exclude:r.avoid}:{});geometry=rr.geometry;legDur=rr.legDur;}
+    catch(e){try{if(r.avoid){const r2=await osrmRoute(wpts);geometry=r2.geometry;legDur=r2.legDur;}else throw e;}catch(e2){geometry=wpts.slice();legDur=null;}}
+    L.polyline(geometry,{color:"#fff",weight:9,opacity:.25}).addTo(lg);
+    L.polyline(geometry,{color:r.color,weight:5,opacity:.78}).addTo(lg);
+    stops.forEach((s,i)=>{
+      let eta=null;
+      if(legDur){
+        if(dir==="going") eta=legDur.slice(i).reduce((a,b)=>a+b,0);              // 정류장→학교
+        else eta=legDur.slice(0,1+viaCount+i).reduce((a,b)=>a+b,0);              // 학교→정류장(경유지 보정)
+      }else{
+        const seq = dir==="going" ? wpts.slice(i) : wpts.slice(0,1+viaCount+i+1);
+        let d=0; for(let k=0;k<seq.length-1;k++) d+=haversine(seq[k],seq[k+1]); eta=d/(22000/3600);
+      }
+      s._eta=eta;
+      const label = dir==="going" ? cnt(s) : s.seq;
+      const m=L.marker(s._ll,{icon:numIcon(r.color,label),draggable:true}).addTo(lg);
+      // 지도에 올라오는 시점에 관리자 모드가 아니면 드래그 비활성화(확실히)
+      m.on("add",function(){ if(!adminMode && this.dragging) this.dragging.disable(); });
+      if(m.dragging && !adminMode) m.dragging.disable();
+      m.bindPopup(popupHtml(r,s,dir));
+      m._ars=s.ars; m._stop=s;
+      m.on("dragend",onStopDragEnd);
+      markers[dir][keyOf(dir,r,s)]=m;
+    });
+  }
+  built[dir]=true;
+}
+
+function popupHtml(r,s,dir){
+  if(dir==="going"){
+    return `<b style="color:${r.color}">${r.name} · 등교</b><br>
+      <b>${s.code}. ${s.name}</b>${s.shared?` <span class="badge">${s.shared}</span>`:""}${s.note?`<br><span style="color:#888">${s.note}</span>`:""}<br>
+      정류소번호 ${s.ars} · 알림 신청 <b>${cnt(s)}명</b>
+      <div class="pop-t"><span class="tm">🕗 도착 예정 ${s.time||"-"}</span> · <span class="eta">학교까지 ${fmtMin(s._eta)}</span></div>`;
+  }
+  const dep=META.comingDepart||{};
+  const depTxt=Object.keys(dep).map(k=>`${k} ${dep[k]}`).join(" / ");
+  return `<b style="color:${r.color}">${r.name} · 하교</b><br>
+    <b>${s.seq}. ${s.name}</b><br>정류소번호 ${s.ars}
+    <div class="pop-t"><span class="eta">🏫 학교 출발 후 약 ${fmtMin(s._eta).replace("약 ","")} 도착 예정</span></div>
+    <div style="font-size:11px;color:#888;margin-top:3px">하교 출발: ${depTxt}</div>`;
+}
+
+// ---- 방향 전환 -----------------------------------------------------
+async function setDirection(dir){
+  if(dir===activeDir && built[dir]) return;
+  if(!built[dir]) await buildDirection(dir);
+  // 레이어 교체
+  ["going","coming"].forEach(d=>{
+    Object.keys(layers[d]).forEach(rid=>{ const lg=layers[d][rid];
+      if(d===dir){ if(!map.hasLayer(lg)) lg.addTo(map); } else { if(map.hasLayer(lg)) map.removeLayer(lg); }
+    });
+  });
+  activeDir=dir;
+  document.getElementById("tabGo").classList.toggle("on",dir==="going");
+  document.getElementById("tabCome").classList.toggle("on",dir==="coming");
+  showOverlay(false);
+  renderPanel(); updateLegend(); updateDirNote(); fitActive();
+}
+function fitActive(){
+  const pts=[schoolLatLng];
+  META.routes.forEach(r=>stopsOf(r,activeDir).forEach(s=>{ if(s._ll)pts.push(s._ll); }));
+  if(pts.length)map.fitBounds(L.latLngBounds(pts).pad(0.12));
+}
+function updateDirNote(){
+  const el=document.getElementById("dirNote");
+  if(activeDir==="going") el.innerHTML="정류장 도착 예정시각(08:20~08:40)과 학교까지 소요시간을 표시합니다. 학교 도착 08:50.";
+  else{ const d=META.comingDepart||{}; el.innerHTML="하교는 반대편 정류장으로 운행합니다. 출발: "+Object.keys(d).map(k=>k+" "+d[k]).join(" / ")+".";}
+}
+
+// ---- 좌측 목록 -----------------------------------------------------
+function renderPanel(){
+  const box=document.getElementById("routes"); box.innerHTML="";
+  META.routes.forEach((r,idx)=>{
+    const stops=stopsOf(r,activeDir);
+    const total=activeDir==="going"?stops.reduce((n,s)=>n+cnt(s),0):null;
+    const meta=activeDir==="going"?`${stops.length}개 · 알림 ${total}명${r.avoid?" · 고속도로 미이용":""}`
+                                  :`${stops.length}개 정류장${r.avoid?" · 고속도로 미이용":""}`;
+    const div=document.createElement("div");div.className="route"+(idx===0?" open":"");
+    div.innerHTML=`<h2><input type="checkbox" checked><span class="dot" style="background:${r.color}"></span>${r.name}
+        <span class="meta">${meta}</span></h2>
+      <ul class="stops">${stops.map(s=>{
+        const key=keyOf(activeDir,r,s);
+        if(activeDir==="going"){
+          return `<li data-key="${key}"><div class="nm">${s.code}. ${s.name}${s.shared?` <span class="badge">${s.shared}</span>`:""}</div>
+            <div class="sub"><span class="badge">🔔 ${cnt(s)}</span><span class="tm">🕗 ${s.time||"-"}</span>
+            <span class="eta">🏫 ${fmtMin(s._eta)}</span></div></li>`;
+        }
+        return `<li data-key="${key}"><div class="nm">${s.seq}. ${s.name}</div>
+          <div class="sub"><span>정류소 ${s.ars}</span><span class="eta">🏫 출발 후 ${fmtMin(s._eta)}</span></div></li>`;
+      }).join("")}</ul>`;
+    box.appendChild(div);
+    div.querySelector("h2").addEventListener("click",e=>{if(e.target.tagName==="INPUT")return;div.classList.toggle("open");});
+    div.querySelector("input").addEventListener("change",e=>{const lg=layers[activeDir][r.id];if(!lg)return;e.target.checked?lg.addTo(map):map.removeLayer(lg);});
+    div.querySelectorAll("li").forEach(li=>li.addEventListener("click",()=>focusKey(li.dataset.key,false)));
+  });
+}
+function updateLegend(){
+  let html=META.routes.map(r=>`<div><span class="dot" style="background:${r.color}"></span>${r.name}</div>`).join("")
+    +`<div><span style="width:14px;text-align:center">🏫</span>한국글로벌중학교</div>`;
+  if(activeDir==="going"){
+    const grand=META.routes.reduce((n,r)=>n+r.going.reduce((m,s)=>m+cnt(s),0),0);
+    html+=`<div style="margin-top:4px;border-top:1px solid #eee;padding-top:4px;color:#555">등교 알림 신청 ${grand}명</div>`;
+  }else{
+    html+=`<div style="margin-top:4px;border-top:1px solid #eee;padding-top:4px;color:#555">하교 (반대편 정류장)</div>`;
+  }
+  document.getElementById("legend").innerHTML=html;
+}
+function focusKey(key,highlight){
+  document.querySelectorAll(".stops li").forEach(li=>li.classList.toggle("hl",highlight&&li.dataset.key===key));
+  const m=markers[activeDir][key]; if(!m)return;
+  const lg=findLayerForKey(key);
+  if(lg&&!map.hasLayer(lg))lg.addTo(map);
+  if(isMobile()) setMobileView('map');           // 모바일: 선택하면 지도로 전환
+  setTimeout(()=>{ map.setView(m.getLatLng(),16,{animate:true}); m.openPopup(); },70);
+}
+function findLayerForKey(key){
+  for(const r of META.routes){ if(stopsOf(r,activeDir).some(s=>keyOf(activeDir,r,s)===key)) return layers[activeDir][r.id]; }
+  return null;
+}
+
+// ---- 알림 구독 (학교 구글 계정 로그인) ------------------------------
+// 명단·조회코드를 쓰지 않는다. 로그인으로 본인 확인하고, 저장하는 건 [계정 + 노선 + 정류장]뿐.
+let ID_TOKEN=null, MY_EMAIL="";
+
+function fillRouteSel(sel){
+  sel.innerHTML=`<option value="0">— 안 받음 —</option>`
+    +META.routes.map(r=>`<option value="${r.id}">${r.name.replace(/\s*\(.*\)/,"")}</option>`).join("");
+}
+function fillStopSel(sel,routeId,dir){
+  const r=META.routes.find(x=>x.id===Number(routeId));
+  if(!r){sel.innerHTML=`<option value="">—</option>`;return;}
+  const list=dir==="coming"?r.coming:r.going;
+  sel.innerHTML=list.map(s=>`<option value="${s.code}">${s.name}</option>`).join("");
+}
+
+// 로그인 버튼 영역 그리기
+function renderSignIn(errMsg){
+  const box=document.getElementById("signInBox");
+  if(!window.BUS_CONFIG){                     // Apps Script 내부 화면(관리자용)
+    box.innerHTML=`<div style="font-size:11.5px;color:#b45309;line-height:1.55">
+      이 화면에서는 알림 설정을 할 수 없습니다.<br>학교에서 안내한 <b>알림 사이트 주소</b>로 접속해 주세요.</div>`;
+    return;
+  }
+  box.innerHTML=`<div id="gsiBtn"></div>`
+    +(errMsg?`<div style="margin-top:7px;font-size:11.5px;color:#b91c1c">${errMsg}</div>`:"");
+  if(window.__renderSignIn) window.__renderSignIn(document.getElementById("gsiBtn"));
+  else setTimeout(()=>{ if(window.__renderSignIn) window.__renderSignIn(document.getElementById("gsiBtn")); }, 400);
+}
+
+// push-client.html 이 로그인 성공 시 호출
+async function onSignedIn(idToken){
+  const box=document.getElementById("fResult");
+  box.className="result";box.style.display="block";box.textContent="계정을 확인하는 중…";
+  try{
+    const sub=await gcall("getSubscription",idToken);
+    ID_TOKEN=idToken; MY_EMAIL=sub.email||"";
+    document.getElementById("signInBox").innerHTML=
+      `<div style="font-size:11.5px;color:#475569">로그인: <b>${MY_EMAIL}</b></div>`;
+    renderSubForm(sub);
+  }catch(e){
+    ID_TOKEN=null;
+    const m=String((e&&e.message)||e);
+    box.style.display="none";
+    renderSignIn(m.indexOf("domain")>=0 ? "학교 계정으로만 이용할 수 있습니다. 학교 계정으로 다시 로그인해 주세요."
+      : "로그인 확인에 실패했습니다. 다시 시도해 주세요.");
+  }
+}
+
+function renderSubForm(sub){
+  const box=document.getElementById("fResult");
+  box.className="result ok";
+  box.innerHTML=`
+    <div style="font-weight:700;margin-bottom:6px">내가 받을 알림</div>
+    <div style="display:grid;grid-template-columns:34px 1fr;gap:5px 6px;align-items:center;font-size:12px">
+      <span>등교</span><span style="display:flex;gap:4px"><select id="agRoute" style="flex:1;min-width:0;font-size:11.5px;padding:4px"></select><select id="agStop" style="flex:1;min-width:0;font-size:11.5px;padding:4px"></select></span>
+      <span>하교</span><span style="display:flex;gap:4px"><select id="acRoute" style="flex:1;min-width:0;font-size:11.5px;padding:4px"></select><select id="acStop" style="flex:1;min-width:0;font-size:11.5px;padding:4px"></select></span>
+    </div>
+    <div style="display:flex;gap:5px;margin-top:8px">
+      <button id="alertSave" style="flex:1">저장</button>
+      <button id="alertOff" style="background:#e5e7eb;color:#374151">알림 끄기</button>
+    </div>
+    <div id="alertMsg" style="margin-top:6px;font-size:11.5px;color:#555"></div>
+    <div id="alertWrap"></div>`;
+
+  const gR=document.getElementById("agRoute"),gS=document.getElementById("agStop");
+  const cR=document.getElementById("acRoute"),cS=document.getElementById("acStop");
+  const msg=document.getElementById("alertMsg");
+  const sync=(rSel,sSel,dir)=>{ if(Number(rSel.value))fillStopSel(sSel,rSel.value,dir); else sSel.innerHTML=`<option value="">—</option>`; };
+  fillRouteSel(gR); fillRouteSel(cR);
+  gR.onchange=()=>sync(gR,gS,"going"); cR.onchange=()=>sync(cR,cS,"coming");
+
+  gR.value=String(sub.goingRoute||0); sync(gR,gS,"going"); if(sub.goingStop)gS.value=sub.goingStop;
+  cR.value=String(sub.comingRoute||0); sync(cR,cS,"coming"); if(sub.comingStop)cS.value=sub.comingStop;
+  msg.textContent=sub.subscribed?"저장된 설정입니다. 바꾸면 저장을 눌러 주세요."
+                                :"타는 노선과 정류장을 고르고 저장하세요.";
+
+  document.getElementById("alertSave").onclick=async ()=>{
+    const btn=document.getElementById("alertSave");
+    btn.disabled=true; msg.textContent="저장 중…";
+    try{
+      const res=await gcall("subscribe",ID_TOKEN,
+        Number(gR.value)||0, Number(gR.value)?gS.value:"",
+        Number(cR.value)||0, Number(cR.value)?cS.value:"");
+      if(res.ok){
+        msg.innerHTML="✅ 저장됐습니다. 버스가 정류장에 가까워지면 알림이 갑니다.";
+        if(Number(gR.value)&&gS.value) focusKey(gS.value,true);
+        applyCounts();
+      }
+      else if(res.reason==="empty") msg.textContent="등교·하교 중 최소 한 곳은 골라야 합니다.";
+      else msg.textContent="저장하지 못했습니다. 선택을 다시 확인해 주세요.";
+    }catch(e){ msg.textContent="오류가 발생했습니다. 잠시 후 다시 시도해 주세요."; }
+    btn.disabled=false;
+  };
+  document.getElementById("alertOff").onclick=async ()=>{
+    if(!confirm("알림을 끄고 저장된 설정을 삭제할까요?")) return;
+    msg.textContent="처리 중…";
+    try{
+      await gcall("unsubscribe",ID_TOKEN);
+      msg.textContent="알림이 해제되고 설정이 삭제됐습니다.";
+      gR.value="0"; sync(gR,gS,"going"); cR.value="0"; sync(cR,cS,"coming");
+      applyCounts();
+    }catch(e){ msg.textContent="해제하지 못했습니다. 잠시 후 다시 시도해 주세요."; }
+  };
+  // 웹푸시 빌드(web/)에서만 존재 — "이 기기에서 알림 받기" 버튼을 끼워 넣는다.
+  if(window.__pushHook) try{ window.__pushHook(document.getElementById("alertWrap")); }catch(e){}
+}
+
+// 구독자 수 갱신(지도·목록의 숫자)
+async function applyCounts(){
+  try{
+    const m=await gcall("getMeta");
+    META.routes.forEach(function(r){
+      const nr=m.routes.find(x=>x.id===r.id); if(!nr) return;
+      r.going.forEach(function(s){ const ns=nr.going.find(x=>x.code===s.code); if(ns) s.count=ns.count; });
+      r.coming.forEach(function(s){ const ns=nr.coming.find(x=>x.code===s.code); if(ns) s.count=ns.count; });
+    });
+    renderPanel(); updateLegend();   // 지도 핀 숫자는 방향 전환/새로고침 때 함께 갱신됨
+  }catch(e){}
+}
+
+// ---- 관리자 편집 모드 ----------------------------------------------
+let _toastT=null;
+function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.style.display="block";
+  clearTimeout(_toastT);_toastT=setTimeout(()=>t.style.display="none",2600);}
+async function onStopDragEnd(e){
+  if(!adminMode) return;
+  const m=e.target, ll=m.getLatLng();
+  try{ await gcall("adminSaveCoord",adminPin,m._ars,ll.lat,ll.lng); m._stop._ll=[ll.lat,ll.lng];
+       toast("저장됨: "+m._stop.name+" ("+ll.lat.toFixed(5)+", "+ll.lng.toFixed(5)+")"); }
+  catch(err){ alert("저장 실패(권한 또는 오류). 다시 시도해 주세요."); }
+}
+function setAdminMode(on){
+  adminMode=on;
+  ["going","coming"].forEach(d=>Object.values(markers[d]).forEach(m=>{ if(m.dragging){on?m.dragging.enable():m.dragging.disable();} }));
+  document.getElementById("adminPanel").style.display=on?"block":"none";
+  document.getElementById("adminBtn").textContent=on?"🔧 관리자(편집 중)":"🔧 관리자";
+  if(!on) clearViaMarkers();
+}
+document.getElementById("adminBtn").onclick=async ()=>{
+  if(adminMode){ setAdminMode(false); return; }
+  const pin=prompt("관리자 암호를 입력하세요:"); if(pin===null) return;
+  try{ const ok=await gcall("adminCheck",pin);
+    if(ok){ adminPin=pin; populateViaSelect(); setAdminMode(true); toast("관리자 모드 시작"); }
+    else alert("암호가 올바르지 않습니다. (스크립트 속성 ADMIN_PIN 확인)"); }
+  catch(e){ alert("확인 중 오류가 발생했습니다."); }
+};
+// 경유지 편집
+const viaIcon=()=>L.divIcon({className:"",html:'<div style="width:14px;height:14px;background:#f08c00;border:2px solid #fff;transform:rotate(45deg);box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>',iconSize:[16,16],iconAnchor:[8,8]});
+function clearViaMarkers(){ viaMarkers.forEach(m=>map.removeLayer(m)); viaMarkers=[]; }
+function populateViaSelect(){
+  const sel=document.getElementById("viaRoute");
+  sel.innerHTML=META.routes.map(r=>`<option value="${r.id}">${r.name}</option>`).join("");
+}
+function curViaRoute(){ return META.routes.find(r=>String(r.id)===document.getElementById("viaRoute").value); }
+function showViaMarkers(){
+  clearViaMarkers();
+  const r=curViaRoute(); if(!r) return;
+  (r.via||[]).forEach(p=>{ const m=L.marker(p,{icon:viaIcon(),draggable:true}).addTo(map); viaMarkers.push(m); });
+  toast("경유지 "+(r.via?r.via.length:0)+"개 표시 (드래그로 이동)");
+}
+document.getElementById("viaEdit").onclick=showViaMarkers;
+document.getElementById("viaRoute").onchange=showViaMarkers;
+document.getElementById("viaAdd").onclick=()=>{ const m=L.marker(map.getCenter(),{icon:viaIcon(),draggable:true}).addTo(map); viaMarkers.push(m); toast("경유지 추가됨 — 원하는 도로 위로 드래그하세요"); };
+document.getElementById("viaClear").onclick=async ()=>{
+  const r=curViaRoute(); if(!r) return;
+  try{ await gcall("adminSaveVia",adminPin,r.id,[]); r.via=[]; clearViaMarkers(); toast("경유지 비움 — 경로 재계산을 눌러 반영하세요"); }
+  catch(e){ alert("저장 실패(권한/오류)."); }
+};
+document.getElementById("viaSave").onclick=async ()=>{
+  const r=curViaRoute(); if(!r) return;
+  const pts=viaMarkers.map(m=>{const ll=m.getLatLng();return [Number(ll.lat.toFixed(6)),Number(ll.lng.toFixed(6))];});
+  try{ await gcall("adminSaveVia",adminPin,r.id,pts); r.via=pts; toast("경유지 "+pts.length+"개 저장 — 경로 재계산을 눌러 반영"); }
+  catch(e){ alert("저장 실패(권한/오류)."); }
+};
+document.getElementById("applyBtn").onclick=applyChanges;
+document.getElementById("adminExit").onclick=()=>setAdminMode(false);
+
+async function applyChanges(){
+  showOverlay(true); setProgress(0.1,"변경사항 반영 중…");
+  META=await gcall("getMeta");
+  ["going","coming"].forEach(d=>{ Object.values(layers[d]).forEach(lg=>{if(map.hasLayer(lg))map.removeLayer(lg);});
+    layers[d]={}; markers[d]={}; built[d]=false; });
+  clearViaMarkers();
+  await buildDirection(activeDir);
+  if(adminMode) setAdminMode(true);
+  showOverlay(false); renderPanel(); updateLegend(); updateDirNote(); fitActive();
+  toast("반영 완료");
+}
+
+document.getElementById("tabGo").onclick=()=>setDirection("going");
+document.getElementById("tabCome").onclick=()=>setDirection("coming");
+
+// 모바일: 목록/지도 전체화면 전환
+function isMobile(){ return window.innerWidth<=760; }
+function setMobileView(v){
+  document.body.classList.toggle('m-list', v==='list');
+  document.body.classList.toggle('m-map', v==='map');
+  document.getElementById('mtList').classList.toggle('on', v==='list');
+  document.getElementById('mtMap').classList.toggle('on', v==='map');
+  if(v==='map') setTimeout(function(){ map.invalidateSize(); if(allLL().length) map.fitBounds(L.latLngBounds(allLL()).pad(0.12)); },60);
+}
+function allLL(){ var p=[schoolLatLng]; META&&META.routes.forEach(function(r){ stopsOf(r,activeDir).forEach(function(s){ if(s._ll)p.push(s._ll); }); }); return p.filter(Boolean); }
+document.getElementById('mtList').onclick=function(){ setMobileView('list'); };
+document.getElementById('mtMap').onclick=function(){ setMobileView('map'); };
+if(isMobile()) setMobileView('list');
+// 로그인 UI는 주입 스크립트(web/push-client.html · preview/panel.html)가 훅을 등록한 뒤에 그린다.
+window.addEventListener("load", function(){ renderSignIn(); });
+
+// ---- 실시간 버스 위치(기사 폰 GPS) ---------------------------------
+var busMarkers={};
+function busDivIcon(color){
+  return L.divIcon({className:"",iconSize:[36,36],iconAnchor:[18,18],
+    html:'<div style="position:relative;width:36px;height:36px">'
+       + '<div style="position:absolute;inset:0;border:3px solid '+color+';background:#fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.4)"></div>'
+       + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px">🚌</div></div>'});
+}
+async function pollBusLive(){
+  if(document.hidden || !META) return;
+  try{
+    var live=await gcall("getBusLive"); var seen={};
+    live.forEach(function(b){
+      seen[b.routeId]=true;
+      var route=META.routes.find(function(r){return r.id===b.routeId;});
+      var color=route?route.color:"#111"; var ll=[b.lat,b.lng];
+      if(busMarkers[b.routeId]) busMarkers[b.routeId].setLatLng(ll);
+      else busMarkers[b.routeId]=L.marker(ll,{icon:busDivIcon(color),zIndexOffset:2000}).addTo(map);
+      busMarkers[b.routeId].bindPopup('<b style="color:'+color+'">'+(route?route.name:('노선 '+b.routeId))+'</b><br>🚌 운행 중'
+        +(b.dir?(' ('+b.dir+')'):'')+'<br>위치 갱신 '+b.ageSec+'초 전');
+    });
+    Object.keys(busMarkers).forEach(function(rid){ if(!seen[rid]){ map.removeLayer(busMarkers[rid]); delete busMarkers[rid]; } });
+  }catch(e){}
+}
+function startBusPolling(){ pollBusLive(); setInterval(pollBusLive, 15000); }
+
+init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불러오지 못했습니다. 새로고침 해주세요.";});
+</script>
+<!-- 외부 호스팅 빌드 전용: 웹푸시(FCM) 클라이언트 -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"></script>
+<script>
+(function(){
+  var CFG=window.BUS_CONFIG||{}, messaging=null, swReg=null;
+  var LSKEY='busPushToken';
+
+  var isIOS=/iP(hone|ad|od)/.test(navigator.userAgent);
+  var standalone=(window.navigator.standalone===true)||window.matchMedia('(display-mode: standalone)').matches;
+
+  function canPush(){
+    return ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+  }
+
+  async function initFCM(){
+    if(messaging) return messaging;
+    if(!CFG.firebase || !CFG.firebase.apiKey) throw new Error('firebase 설정이 비어 있습니다 (config.js)');
+    if(!CFG.vapidKey) throw new Error('vapidKey 가 비어 있습니다 (config.js)');
+    if(!firebase.apps.length) firebase.initializeApp(CFG.firebase);
+    swReg = await navigator.serviceWorker.getRegistration('firebase-messaging-sw.js')
+         || await navigator.serviceWorker.register('firebase-messaging-sw.js');
+    messaging = firebase.messaging();   // 토큰 발급 용도로만 사용(표시는 서비스워커가 담당)
+    return messaging;
+  }
+
+  async function enable(status, btn){
+    btn.disabled=true;
+    try{
+      if(!canPush()) throw new Error('이 브라우저는 웹푸시를 지원하지 않습니다.');
+      if(isIOS && !standalone){
+        status.innerHTML='아이폰은 <b>홈 화면에 추가</b> 후에만 알림을 받을 수 있습니다.<br>'
+          +'사파리 하단 공유 버튼 → "홈 화면에 추가" → 홈 화면 아이콘으로 다시 열어 주세요.';
+        btn.disabled=false; return;
+      }
+      status.textContent='알림 권한을 확인합니다…';
+      var perm=await Notification.requestPermission();
+      if(perm!=='granted'){
+        status.textContent='알림이 허용되지 않았습니다. 브라우저 설정에서 이 사이트의 알림을 허용해 주세요.';
+        btn.disabled=false; return;
+      }
+      status.textContent='기기를 등록하는 중…';
+      await initFCM();
+      var token=await messaging.getToken({vapidKey:CFG.vapidKey, serviceWorkerRegistration:swReg});
+      if(!token) throw new Error('기기 토큰을 받지 못했습니다.');
+      await gcall('savePushToken', ID_TOKEN, token);
+      try{ localStorage.setItem(LSKEY, token); }catch(e){}
+      status.innerHTML='✅ 이 기기로 알림을 받습니다. 앱을 닫아도 알림이 옵니다.';
+      btn.textContent='📲 이 기기 알림 켜짐';
+    }catch(err){
+      status.textContent='알림 설정 실패: '+((err&&err.message)||err);
+      btn.disabled=false;
+    }
+  }
+
+  /* ---- 학교 구글 계정 로그인 (Google Identity Services) ----
+   * 로그인 성공 시 ID 토큰을 Index.html 의 onSignedIn() 으로 넘긴다.
+   * 서버(Auth.gs)가 그 토큰의 진위와 학교 도메인을 검증한다.
+   */
+  window.__renderSignIn=function(el){
+    if(!el) return;
+    if(!CFG.googleClientId){
+      el.innerHTML='<div style="font-size:11.5px;color:#b91c1c">config.js 의 googleClientId 를 설정해 주세요.</div>';
+      return;
+    }
+    if(!(window.google && google.accounts && google.accounts.id)){
+      el.innerHTML='<div style="font-size:11.5px;color:#6b7280">로그인 모듈을 불러오는 중…</div>';
+      setTimeout(function(){ window.__renderSignIn(el); }, 600);
+      return;
+    }
+    google.accounts.id.initialize({
+      client_id: CFG.googleClientId,
+      hd: CFG.allowedDomain || undefined,        // 학교 도메인 계정만 보이도록 힌트
+      callback: function(res){
+        if(res && res.credential && typeof onSignedIn==='function') onSignedIn(res.credential);
+      }
+    });
+    el.innerHTML='';
+    google.accounts.id.renderButton(el, {theme:'outline', size:'large', text:'signin_with', locale:'ko', width:260});
+  };
+
+  // Index.html 의 renderSubForm() 이 호출하는 훅
+  window.__pushHook=function(wrap){
+    if(!wrap || wrap.querySelector('#pushBtn')) return;
+    var box=document.createElement('div');
+    box.style.marginTop='9px';
+    box.style.borderTop='1px dashed #a7f3d0';
+    box.style.paddingTop='8px';
+    box.innerHTML='<button id="pushBtn">📲 이 기기에서 알림 받기</button>'
+      +'<div id="pushMsg" style="margin-top:6px;font-size:11.5px;color:#555"></div>';
+    wrap.appendChild(box);
+    var btn=box.querySelector('#pushBtn'), msg=box.querySelector('#pushMsg');
+
+    if(!canPush()){
+      msg.textContent='이 브라우저는 웹푸시를 지원하지 않습니다. 대신 로그인한 학교 계정 메일로 알림이 갑니다.';
+      btn.disabled=true; return;
+    }
+    if(Notification.permission==='granted'){
+      var saved=''; try{ saved=localStorage.getItem(LSKEY)||''; }catch(e){}
+      if(saved){ btn.textContent='📲 이 기기 알림 켜짐'; msg.textContent='이미 이 기기로 알림을 받고 있습니다.'; }
+      else msg.textContent='알림 권한은 있습니다. 버튼을 눌러 이 기기를 등록해 주세요.';
+    }else if(isIOS && !standalone){
+      msg.innerHTML='아이폰은 <b>홈 화면에 추가</b> 후 알림을 받을 수 있습니다.';
+    }
+    btn.onclick=function(){ enable(msg, btn); };
+  };
+
+  // 서비스워커는 의존성이 없으므로 미리 등록해 둔다(설정 전에도 실패하지 않음).
+  window.addEventListener('load', function(){
+    if('serviceWorker' in navigator){
+      navigator.serviceWorker.register('firebase-messaging-sw.js').catch(function(e){
+        console.warn('서비스워커 등록 실패:', e);
+      });
+    }
+  });
+  // 앱이 열려 있을 때 온 푸시도 서비스워커가 알림으로 표시한다(별도 처리 불필요).
+})();
+</script>
+
+</body>
+</html>
