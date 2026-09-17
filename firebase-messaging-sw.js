@@ -9,23 +9,39 @@
 self.addEventListener('install', function () { self.skipWaiting(); });
 self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim()); });
 
+// 진단용: 이 기기가 마지막으로 푸시를 "받았는지 / 화면에 띄웠는지"를 기록해 둔다.
+// 화면(push-client)이 이 기록을 읽어 보여주므로, 폰에 알림이 안 뜰 때
+// "아예 도착을 안 한 것"과 "도착했는데 표시가 막힌 것"을 구분할 수 있다.
+function recordPush(info) {
+  return caches.open('bus-diag').then(function (c) {
+    return c.put('last-push', new Response(JSON.stringify(info), { headers: { 'Content-Type': 'application/json' } }));
+  }).catch(function () {});
+}
+
 self.addEventListener('push', function (e) {
   var payload = {};
   try { payload = e.data ? e.data.json() : {}; }
   catch (err) { payload = { title: '통학버스', body: e.data ? e.data.text() : '' }; }
 
-  // data-only 메시지면 payload.data, notification 페이로드면 payload.notification 에 들어온다.
+  // 서버는 data 와 notification 을 함께 보낸다. data 를 우선 쓰고, 없으면 notification.
   var n = payload.data || payload.notification || payload;
+  var at = Date.now();
 
-  e.waitUntil(self.registration.showNotification(n.title || '통학버스', {
-    body: n.body || '',
-    icon: 'icon-192.png',
-    badge: 'icon-192.png',
-    tag: n.tag || 'bus-arrival',
-    renotify: true,
-    vibrate: [200, 100, 200],
-    data: { url: n.url || './' }
-  }));
+  e.waitUntil(
+    self.registration.showNotification(n.title || '통학버스', {
+      body: n.body || '',
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      tag: n.tag || 'bus-arrival',
+      renotify: true,
+      vibrate: [200, 100, 200],
+      data: { url: n.url || './' }
+    }).then(function () {
+      return recordPush({ at: at, shown: true, title: n.title || '' });
+    }).catch(function (err) {
+      return recordPush({ at: at, shown: false, error: String((err && err.message) || err) });
+    })
+  );
 });
 
 self.addEventListener('notificationclick', function (e) {

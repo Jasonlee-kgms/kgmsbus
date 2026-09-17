@@ -892,6 +892,24 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
         : '알림이 차단되어 있습니다. 주소창 왼쪽 <b>자물쇠 아이콘 → 알림 → 허용</b>으로 바꿔 주세요.';
     }
     btn.onclick=function(){ enable(msg, btn); };
+
+    // 진단: 이 기기가 마지막으로 받은 푸시(서비스워커가 기록) 표시
+    var diag=document.createElement('div');
+    diag.style.cssText='margin-top:6px;font-size:11px;color:#94a3b8';
+    box.appendChild(diag);
+    function showDiag(){
+      if(!('caches' in window)) return;
+      caches.open('bus-diag').then(function(c){ return c.match('last-push'); })
+        .then(function(r){ return r ? r.json() : null; })
+        .then(function(d){
+          if(!d){ diag.textContent='이 기기가 받은 알림: 아직 없음'; return; }
+          var t=new Date(d.at), hh=('0'+t.getHours()).slice(-2)+':'+('0'+t.getMinutes()).slice(-2);
+          diag.textContent='이 기기가 마지막으로 받은 알림: '+(t.getMonth()+1)+'/'+t.getDate()+' '+hh
+            +(d.shown ? ' · 화면 표시 성공' : ' · 도착했지만 표시 실패('+(d.error||'?')+')');
+        }).catch(function(){});
+    }
+    showDiag();
+    document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='visible') showDiag(); });
   };
 
   // 서비스워커는 의존성이 없으므로 미리 등록해 둔다(설정 전에도 실패하지 않음).
