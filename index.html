@@ -733,7 +733,7 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"></script>
 <script>
 (function(){
-  var CFG=window.BUS_CONFIG||{}, messaging=null, swReg=null;
+  var CFG=window.BUS_CONFIG||{}, messaging=null, swReg=null, gisInited=false;
   var LSKEY='busPushToken';
 
   var isIOS=/iP(hone|ad|od)/.test(navigator.userAgent);
@@ -798,13 +798,20 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
       setTimeout(function(){ window.__renderSignIn(el); }, 600);
       return;
     }
-    google.accounts.id.initialize({
-      client_id: CFG.googleClientId,
-      hd: CFG.allowedDomain || undefined,        // 학교 도메인 계정만 보이도록 힌트
-      callback: function(res){
-        if(res && res.credential && typeof onSignedIn==='function') onSignedIn(res.credential);
-      }
-    });
+    // initialize() 는 페이지당 한 번만. 여러 번 부르면 버튼을 눌러도 콜백이 오지 않는 경우가 있다.
+    if(!gisInited){
+      google.accounts.id.initialize({
+        client_id: CFG.googleClientId,
+        hd: CFG.allowedDomain || undefined,      // 학교 도메인 계정만 보이도록 힌트(강제는 서버가 함)
+        ux_mode: 'popup',
+        itp_support: true,                       // 사파리/아이폰 추적방지 환경 대응
+        callback: function(res){
+          if(res && res.credential && typeof onSignedIn==='function') onSignedIn(res.credential);
+          else alert('구글 로그인 응답을 받지 못했습니다. 다시 시도해 주세요.');
+        }
+      });
+      gisInited=true;
+    }
     el.innerHTML='';
     google.accounts.id.renderButton(el, {theme:'outline', size:'large', text:'signin_with', locale:'ko', width:260});
   };
