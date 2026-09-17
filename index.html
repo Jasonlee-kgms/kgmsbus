@@ -16,20 +16,54 @@
 (function(){
   var CFG = window.BUS_CONFIG || {};
 
-  function call(fn, args){
-    if(!CFG.gasUrl || CFG.gasUrl.indexOf('여기에_배포ID')>=0){
-      return Promise.reject(new Error('config.js 의 gasUrl 을 먼저 설정해 주세요.'));
-    }
-    // Content-Type 을 text/plain 으로 보내야 프리플라이트(OPTIONS) 없이 통과한다.
-    // GAS 는 OPTIONS 요청에 응답하지 못하므로 application/json 으로 보내면 CORS 에 막힌다.
+  function serverError(msg){ var e=new Error(msg); e.fromServer=true; return e; }
+
+  // 1차: POST. Content-Type 을 text/plain 으로 보내야 프리플라이트(OPTIONS) 없이 통과한다.
+  // (GAS 는 OPTIONS 에 응답하지 못하므로 application/json 으로 보내면 CORS 에 막힌다)
+  function postCall(fn, args){
     return fetch(CFG.gasUrl, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body: JSON.stringify({fn:fn, args:args}),
       redirect:'follow'
     }).then(function(r){ return r.json(); }).then(function(j){
-      if(!j || !j.ok) throw new Error((j && j.error) || 'api_error');
+      if(!j || !j.ok) throw serverError((j && j.error) || 'api_error');
       return j.result;
+    });
+  }
+
+  // 2차: 스크립트 태그(JSONP). CORS 검사 자체가 없어서 아이폰 홈 화면 앱에서도 통과한다.
+  // 아이폰은 (1) 구글 로그인 창에서 앱으로 막 돌아온 순간의 요청을 끊거나
+  // (2) Apps Script 의 POST→리디렉션을 거부해 "Load failed" 를 내는 경우가 있어 대비용으로 둔다.
+  var cbSeq=0;
+  function jsonpCall(fn, args){
+    return new Promise(function(resolve, reject){
+      var cb='__gasCb'+Date.now()+'_'+(cbSeq++);
+      var s=document.createElement('script');
+      // Apps Script 는 한동안 안 쓰이다 첫 요청이 오면 깨어나는 데 수십 초가 걸리기도 한다(실측 54초)
+      var timer=setTimeout(function(){ done(); reject(new Error('서버 응답이 늦습니다. 잠시 후 다시 시도해 주세요')); }, 60000);
+      function done(){ clearTimeout(timer); try{ delete window[cb]; }catch(e){ window[cb]=undefined; } s.remove(); }
+      window[cb]=function(j){
+        done();
+        if(!j || !j.ok) reject(serverError((j && j.error) || 'api_error'));
+        else resolve(j.result);
+      };
+      s.onerror=function(){ done(); reject(new Error('서버에 연결하지 못했습니다')); };
+      s.src=CFG.gasUrl+'?api='+encodeURIComponent(fn)
+        +'&args='+encodeURIComponent(JSON.stringify(args))
+        +'&callback='+cb+'&_='+Date.now();
+      document.head.appendChild(s);
+    });
+  }
+
+  function call(fn, args){
+    if(!CFG.gasUrl || CFG.gasUrl.indexOf('여기에_배포ID')>=0){
+      return Promise.reject(new Error('config.js 의 gasUrl 을 먼저 설정해 주세요.'));
+    }
+    return postCall(fn, args).catch(function(err){
+      if(err && err.fromServer) throw err;             // 서버가 거절한 건 재시도해도 같으므로 그대로 전달
+      return new Promise(function(r){ setTimeout(r, 800); })   // 앱이 완전히 앞으로 올라올 시간
+        .then(function(){ return jsonpCall(fn, args); });
     });
   }
 
