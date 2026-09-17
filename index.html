@@ -508,7 +508,11 @@ async function onSignedIn(idToken){
     const sub=await gcall("getSubscription",idToken);
     ID_TOKEN=idToken; MY_EMAIL=sub.email||"";
     document.getElementById("signInBox").innerHTML=
-      `<div style="font-size:11.5px;color:#475569">로그인: <b>${MY_EMAIL}</b></div>`;
+      `<div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:#475569">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">로그인: <b>${MY_EMAIL}</b></span>
+        <button id="signOutBtn" style="padding:4px 10px;font-size:11.5px;background:#e5e7eb;color:#374151">로그아웃</button>
+      </div>`;
+    document.getElementById("signOutBtn").onclick=signOut;
     renderSubForm(sub);
   }catch(e){
     ID_TOKEN=null;
@@ -519,6 +523,15 @@ async function onSignedIn(idToken){
       ? "학교 계정"+(dom?"(@"+dom+")":"")+"으로만 이용할 수 있습니다. 학교 계정으로 다시 로그인해 주세요."
       : "로그인 확인에 실패했습니다. 다시 시도해 주세요. (코드: "+m.replace(/^Error:\s*/,"")+")");
   }
+}
+
+// 로그아웃: 이 화면의 로그인 상태만 지운다. (구독 설정과 알림은 그대로 유지됨)
+function signOut(){
+  ID_TOKEN=null; MY_EMAIL="";
+  const box=document.getElementById("fResult");
+  box.style.display="none"; box.innerHTML="";
+  if(window.__signOut) try{ window.__signOut(); }catch(e){}
+  renderSignIn();
 }
 
 function renderSubForm(sub){
@@ -794,6 +807,11 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
     });
     el.innerHTML='';
     google.accounts.id.renderButton(el, {theme:'outline', size:'large', text:'signin_with', locale:'ko', width:260});
+  };
+
+  // 로그아웃 시: 다음 방문 때 같은 계정으로 자동 로그인되지 않게 하고, 계정 선택창을 다시 띄운다.
+  window.__signOut=function(){
+    try{ if(window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect(); }catch(e){}
   };
 
   // Index.html 의 renderSubForm() 이 호출하는 훅
