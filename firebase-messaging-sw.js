@@ -32,8 +32,9 @@ self.addEventListener('push', function (e) {
       body: n.body || '',
       icon: 'icon-192.png',
       badge: 'icon-192.png',
-      tag: n.tag || 'bus-arrival',
-      renotify: true,
+      // 알림마다 다른 꼬리표. 같은 꼬리표를 쓰면 아이폰이 알림 센터에 남은 이전 알림(예: 아침 등교 알림)과
+      // 새 알림을 소리·배너 없이 바꿔치기해서, 새 알림이 온 줄 모르게 된다. 중복 방지는 서버가 이미 한다.
+      tag: n.tag || ('bus-' + at),
       vibrate: [200, 100, 200],
       data: { url: n.url || './' }
     }).then(function () {
