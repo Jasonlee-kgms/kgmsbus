@@ -39,7 +39,8 @@
     withFailureHandler:function(fn){ this._f=fn; return this; }
   };
 
-  ['getMeta','getBusLive','lookup','confirmBoard','getRegistration','saveRegistration',
+  // ⚠ Api.gs 의 API_ALLOW 와 같은 목록이어야 한다. 서버에 함수를 추가하면 여기에도 추가할 것.
+  ['getMeta','getBusLive','whoAmI','getSubscription','subscribe','unsubscribe',
    'savePushToken','deletePushToken'].forEach(function(name){
     run[name]=function(){
       var args=[].slice.call(arguments), s=this._s, f=this._f;
@@ -612,6 +613,11 @@ function setAdminMode(on){
 }
 document.getElementById("adminBtn").onclick=async ()=>{
   if(adminMode){ setAdminMode(false); return; }
+  // 공개 사이트(GitHub Pages)에서는 관리자 기능을 막아뒀다 — 관리자 암호가 외부로 오가지 않게.
+  if(window.BUS_CONFIG && window.BUS_CONFIG.gasUrl){
+    alert("관리자 편집은 이 공개 사이트에서는 할 수 없습니다.\n\n선생님용 주소(Apps Script 웹앱)로 접속해서 🔧 관리자를 눌러 주세요:\n"+window.BUS_CONFIG.gasUrl);
+    return;
+  }
   const pin=prompt("관리자 암호를 입력하세요:"); if(pin===null) return;
   try{ const ok=await gcall("adminCheck",pin);
     if(ok){ adminPin=pin; populateViaSelect(); setAdminMode(true); toast("관리자 모드 시작"); }
