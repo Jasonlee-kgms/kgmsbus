@@ -815,27 +815,49 @@ function busDivIcon(color){
 async function pollBusLive(){
   if(document.hidden || !META) return;
   try{
-    var live=await gcall("getBusLive"); var seen={};
-    live.forEach(function(b){
-      seen[b.routeId]=true;
-      var route=META.routes.find(function(r){return r.id===b.routeId;});
-      var color=route?route.color:"#111"; var ll=[b.lat,b.lng];
-      if(busMarkers[b.routeId]) busMarkers[b.routeId].setLatLng(ll);
-      else busMarkers[b.routeId]=L.marker(ll,{icon:busDivIcon(color),zIndexOffset:2000}).addTo(map);
-      // 위치가 오래된 것을 숨기지 않는다 — 흐리게 표시해 "지금 여기"가 아님을 알린다.
-      // (전송 5초 + 폴링 5초 + 응답 1~5초 = 최대 15초 지연. 신호가 끊기면 더 벌어진다)
-      var stale=b.ageSec>20;
-      try{ busMarkers[b.routeId].setOpacity(stale?0.45:1); }catch(e){}
-      busMarkers[b.routeId].bindPopup('<b style="color:'+color+'">'+(route?route.name:('노선 '+b.routeId))+'</b><br>🚌 운행 중'
-        +(b.dir?(' ('+b.dir+')'):'')
-        +(b.spdKmh?('<br>속도 약 '+b.spdKmh+' km/h'):'')
-        +'<br>'+(stale?'⚠ 신호 끊김 — ':'')+'위치 갱신 '+b.ageSec+'초 전');
-    });
-    Object.keys(busMarkers).forEach(function(rid){ if(!seen[rid]){ map.removeLayer(busMarkers[rid]); delete busMarkers[rid]; } });
+    var live=await gcall("getBusLive");
+    // 실시간 채널이 더 최신이면 폴링 결과로 되돌리지 않는다
+    if(liveStamp && Date.now()-liveStamp < 20000) return;
+    renderBusLive(live);
   }catch(e){}
 }
-// 5초 주기. 15초였을 때 기사 전송 10초 + 폴링 15초 + 응답 = 최대 30초(60km/h 에서 약 500m) 뒤처졌다.
-function startBusPolling(){ pollBusLive(); setInterval(pollBusLive, 5000); }
+
+var liveStamp=0;
+function renderBusLive(live){
+  if(!META) return;
+  if(!Array.isArray(live)) return;
+  liveStamp=Date.now();
+  var seen={};
+  live.forEach(function(b){
+    seen[b.routeId]=true;
+    var route=META.routes.find(function(r){return r.id===b.routeId;});
+    var color=route?route.color:"#111"; var ll=[b.lat,b.lng];
+    if(busMarkers[b.routeId]) busMarkers[b.routeId].setLatLng(ll);
+    else busMarkers[b.routeId]=L.marker(ll,{icon:busDivIcon(color),zIndexOffset:2000}).addTo(map);
+    // 위치가 오래된 것을 숨기지 않는다 — 흐리게 표시해 "지금 여기"가 아님을 알린다.
+    var stale=b.ageSec>20;
+    try{ busMarkers[b.routeId].setOpacity(stale?0.45:1); }catch(e){}
+    busMarkers[b.routeId].bindPopup('<b style="color:'+color+'">'+(route?route.name:('노선 '+b.routeId))+'</b><br>🚌 운행 중'
+      +(b.dir?(' ('+b.dir+')'):'')
+      +(b.spdKmh?('<br>속도 약 '+b.spdKmh+' km/h'):'')
+      +'<br>'+(stale?'⚠ 신호 끊김 — ':'')+'위치 갱신 '+b.ageSec+'초 전');
+  });
+  Object.keys(busMarkers).forEach(function(rid){ if(!seen[rid]){ map.removeLayer(busMarkers[rid]); delete busMarkers[rid]; } });
+}
+
+/* 버스 위치 받기 —
+ *  ① Firebase 실시간 채널(web/live-client.html)이 있으면 웹소켓으로 즉시 받는다(1초 이내).
+ *  ② 없으면 Apps Script 를 5초마다 물어본다(6~12초 뒤처짐. 2026-09-18 실측).
+ * 실시간 채널을 쓰는 경우에도 30초마다 한 번은 서버를 확인해, RTDB 가 비어 있는 동안에도
+ * (예: 기사 기기가 Firebase 로그인에 실패한 경우) 버스가 지도에서 사라지지 않게 한다. */
+function startBusPolling(){
+  var usingLive=false;
+  if(typeof window.__liveSubscribe==="function"){
+    usingLive = window.__liveSubscribe(function(list){ renderBusLive(list); }) !== false;
+  }
+  pollBusLive();
+  setInterval(pollBusLive, usingLive ? 30000 : 5000);
+}
 
 init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불러오지 못했습니다. 새로고침 해주세요.";});
 </script>
@@ -866,7 +888,12 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
     if(messaging) return messaging;
     if(!CFG.firebase || !CFG.firebase.apiKey) throw new Error('firebase 설정이 비어 있습니다 (config.js)');
     if(!CFG.vapidKey) throw new Error('vapidKey 가 비어 있습니다 (config.js)');
-    if(!firebase.apps.length) firebase.initializeApp(CFG.firebase);
+    if(!firebase.apps.length){
+      // 실시간 지도(RTDB)와 같은 앱 인스턴스를 쓰도록 databaseURL 도 함께 넣는다
+      var opts={}; Object.keys(CFG.firebase).forEach(function(k){ opts[k]=CFG.firebase[k]; });
+      if(CFG.rtdbUrl) opts.databaseURL=CFG.rtdbUrl;
+      firebase.initializeApp(opts);
+    }
     swReg = await navigator.serviceWorker.getRegistration('firebase-messaging-sw.js')
          || await navigator.serviceWorker.register('firebase-messaging-sw.js');
     messaging = firebase.messaging();   // 토큰 발급 용도로만 사용(표시는 서비스워커가 담당)
@@ -1019,6 +1046,69 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
     }
   });
   // 앱이 열려 있을 때 온 푸시도 서비스워커가 알림으로 표시한다(별도 처리 불필요).
+})();
+</script>
+
+<!-- 실시간 버스 위치 수신 (Firebase Realtime Database)
+     Apps Script 폴링은 6~12초 뒤처진다(2026-09-18 실측). 여기서는 웹소켓으로 즉시 받는다.
+     RTDB 설정이 없으면 아무것도 하지 않고, 지도는 예전 폴링 방식으로 계속 동작한다.
+     읽기 전용이다 — 쓰기는 기사 기기(driver 클레임)만 가능하도록 RTDB 규칙에서 막혀 있다. -->
+<!-- firebase-app-compat 은 push-client 가 이미 불러온다. 두 번 불러오면 window.firebase 가
+     교체되어 database 가 등록된 인스턴스를 잃는다. 여기서는 database 만 추가로 얹는다. -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+(function () {
+  var CFG = (window.BUS_CONFIG || {});
+  var url = CFG.rtdbUrl;
+  if (!url) return;                       // 미설정 → 폴링 유지
+
+  /* 지도에 넘겨줄 구독 함수. Index.html 이 이 함수가 있으면 폴링 대신 이것을 쓴다.
+     cb(list) 형태로 getBusLive() 와 같은 모양의 배열을 넘긴다. */
+  window.__liveSubscribe = function (cb) {
+    try {
+      if (!window.firebase || !firebase.database) return false;
+      // ★ 전체 firebase 설정에 databaseURL 만 더해 초기화한다.
+      //   여기서 apiKey 만 넣고 초기화하면, 나중에 push-client 가 initializeApp 을 건너뛰어
+      //   projectId/messagingSenderId 가 없는 앱으로 FCM 토큰 발급이 실패한다.
+      if (!firebase.apps.length) {
+        var opts = {};
+        var base = CFG.firebase || {};
+        Object.keys(base).forEach(function (k) { opts[k] = base[k]; });
+        opts.databaseURL = url;
+        firebase.initializeApp(opts);
+      }
+      var latest = {};                    // routeId → 마지막 기록
+
+      // 화면에 보이는 "N초 전"이 멈춰 있지 않도록, 값이 안 바뀌어도 1초마다 다시 계산해 넘긴다.
+      function emit() {
+        var now = Date.now(), out = [];
+        Object.keys(latest).forEach(function (rid) {
+          var v = latest[rid];
+          if (!v || !isFinite(v.lat) || !isFinite(v.lng) || !v.ts) return;
+          var age = (now - v.ts) / 1000;
+          if (age > 90) return;           // 오래된 신호는 지도에서 제거
+          out.push({ routeId: Number(rid), lat: v.lat, lng: v.lng,
+                     ageSec: Math.round(age), dir: v.dir || '', spdKmh: v.spdKmh || 0 });
+        });
+        cb(out);
+      }
+
+      var ref = firebase.database().ref('bus');
+      ref.on('child_added',   function (s) { latest[s.key] = s.val(); emit(); });
+      ref.on('child_changed', function (s) { latest[s.key] = s.val(); emit(); });
+      ref.on('child_removed', function (s) { delete latest[s.key];   emit(); });
+      setInterval(emit, 1000);
+
+      // 연결 상태를 콘솔에만 남긴다(학생 화면을 어지럽히지 않는다)
+      firebase.database().ref('.info/connected').on('value', function (s) {
+        if (window.console) console.log('실시간 위치 채널: ' + (s.val() ? '연결됨' : '끊김(재연결 시도)'));
+      });
+      return true;
+    } catch (e) {
+      if (window.console) console.warn('실시간 위치 채널 사용 불가 — 폴링으로 동작합니다:', e);
+      return false;
+    }
+  };
 })();
 </script>
 

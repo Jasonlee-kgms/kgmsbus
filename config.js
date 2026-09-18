@@ -12,6 +12,9 @@
       messagingSenderId: '429005922817',
       appId: '1:429005922817:web:52cbd572149273790fd600'
     },
+    // Firebase 실시간 DB 주소(실시간 지도용). 비우면 예전 폴링 방식으로 동작합니다.
+    // Firebase 콘솔 > Realtime Database 를 만들면 나오는 주소 그대로.
+    rtdbUrl: 'https://kgmsbus-1f649-default-rtdb.asia-southeast1.firebasedatabase.app',
     vapidKey: 'BLXqe9pUFJjlMCa-Xzr0Wh5LKsXGkI6tcXz5Y5Z6RG1o-DPHKBQBIkqScrHdRrcp2ExAUwdlbXu_3dbSUie2n88',
     googleClientId: '866237942837-r1flmpg0urusn6ci1f6urgh2ii823d79.apps.googleusercontent.com',
     allowedDomain: 'koreaglobal.ms.kr'
