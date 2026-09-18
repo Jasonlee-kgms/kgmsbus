@@ -75,7 +75,7 @@
 
   // ⚠ Api.gs 의 API_ALLOW 와 같은 목록이어야 한다. 서버에 함수를 추가하면 여기에도 추가할 것.
   ['getMeta','getBusLive','whoAmI','getSubscription','subscribe','unsubscribe',
-   'savePushToken','deletePushToken'].forEach(function(name){
+   'savePushToken','deletePushToken','saveFeedback','reportPushDelay'].forEach(function(name){
     run[name]=function(){
       var args=[].slice.call(arguments), s=this._s, f=this._f;
       call(name,args).then(function(res){ if(s) s(res); }).catch(function(err){ if(f) f(err); });
@@ -582,7 +582,21 @@ function renderSubForm(sub){
       <button id="alertOff" style="background:#e5e7eb;color:#374151">알림 끄기</button>
     </div>
     <div id="alertMsg" style="margin-top:6px;font-size:11.5px;color:#555"></div>
-    <div id="alertWrap"></div>`;
+    <div id="alertWrap"></div>
+    <div id="fbWrap" style="margin-top:10px;border-top:1px dashed #a7f3d0;padding-top:9px">
+      <div style="font-weight:700;margin-bottom:4px">🧪 베타테스트 의견</div>
+      <div style="font-size:11.5px;color:#6b7280;margin-bottom:6px">알림을 받아본 뒤 눌러주세요. 선생님에게 전달됩니다.</div>
+      <div style="display:flex;gap:4px">
+        <button class="fbBtn" data-kind="good" style="flex:1;min-width:0;font-size:11.5px;padding:7px 4px">👍 잘 왔어요</button>
+        <button class="fbBtn" data-kind="late" style="flex:1;min-width:0;font-size:11.5px;padding:7px 4px;background:#b45309">🐢 늦게 왔어요</button>
+        <button class="fbBtn" data-kind="none" style="flex:1;min-width:0;font-size:11.5px;padding:7px 4px;background:#b91c1c">✖ 안 왔어요</button>
+      </div>
+      <div style="display:flex;gap:4px;margin-top:5px">
+        <input id="fbNote" placeholder="한 줄 의견(선택)" maxlength="200" style="flex:1;min-width:0;padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px">
+        <button class="fbBtn" data-kind="etc" style="font-size:11.5px;padding:7px 10px;background:#475569">보내기</button>
+      </div>
+      <div id="fbMsg" style="margin-top:6px;font-size:11.5px;color:#555"></div>
+    </div>`;
 
   const gR=document.getElementById("agRoute"),gS=document.getElementById("agStop");
   const cR=document.getElementById("acRoute"),cS=document.getElementById("acStop");
@@ -623,8 +637,27 @@ function renderSubForm(sub){
       applyCounts();
     }catch(e){ msg.textContent="해제하지 못했습니다. 잠시 후 다시 시도해 주세요."; }
   };
+  // 베타테스트 의견 버튼
+  const fbMsg=document.getElementById("fbMsg");
+  document.querySelectorAll(".fbBtn").forEach(b=>{
+    b.onclick=async ()=>{
+      const kind=b.dataset.kind, note=document.getElementById("fbNote").value.trim();
+      if(kind==="etc" && !note){ fbMsg.textContent="한 줄 의견을 입력해 주세요."; return; }
+      document.querySelectorAll(".fbBtn").forEach(x=>x.disabled=true);
+      fbMsg.textContent="보내는 중…";
+      try{
+        const res=await gcall("saveFeedback",ID_TOKEN,kind,note);
+        fbMsg.textContent = res.ok ? "✅ 보냈습니다. 고맙습니다!" : "보내지 못했습니다. 잠시 후 다시 시도해 주세요.";
+        if(res.ok) document.getElementById("fbNote").value="";
+      }catch(e){ fbMsg.textContent="오류가 발생했습니다. 잠시 후 다시 시도해 주세요."; }
+      document.querySelectorAll(".fbBtn").forEach(x=>x.disabled=false);
+    };
+  });
+
   // 웹푸시 빌드(web/)에서만 존재 — "이 기기에서 알림 받기" 버튼을 끼워 넣는다.
   if(window.__pushHook) try{ window.__pushHook(document.getElementById("alertWrap")); }catch(e){}
+  // 기기가 기록해 둔 "알림 받은 시각"을 서버로 올려 지연을 자동 수집한다(웹푸시 빌드 전용).
+  if(window.__reportDelays) try{ window.__reportDelays(ID_TOKEN); }catch(e){}
 }
 
 // 구독자 수 갱신(지도·목록의 숫자)
@@ -851,6 +884,20 @@ init().catch(err=>{document.getElementById("ovMsg").textContent="지도를 불�
     }
     el.innerHTML='';
     google.accounts.id.renderButton(el, {theme:'outline', size:'large', text:'signin_with', locale:'ko', width:260});
+  };
+
+  /* 기기가 기록해 둔 "알림 받은 시각"을 서버로 올린다(지연 자동 수집).
+     서버 발송 시각은 푸시 안에 담겨 오므로, 학생은 아무것도 하지 않아도 지연이 초 단위로 기록된다. */
+  window.__reportDelays=function(idToken){
+    if(!idToken || !('caches' in window)) return;
+    caches.open('bus-diag').then(function(c){
+      return c.match('delay-queue').then(function(r){ return r ? r.json() : []; }).then(function(list){
+        if(!list || !list.length) return;
+        return gcall('reportPushDelay', idToken, list).then(function(){
+          return c.delete('delay-queue');        // 서버가 받았으면 비운다(중복은 서버에서도 걸러짐)
+        });
+      });
+    }).catch(function(){});
   };
 
   // 로그아웃 시: 다음 방문 때 같은 계정으로 자동 로그인되지 않게 하고, 계정 선택창을 다시 띄운다.

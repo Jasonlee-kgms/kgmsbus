@@ -14,7 +14,18 @@ self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim(
 // "아예 도착을 안 한 것"과 "도착했는데 표시가 막힌 것"을 구분할 수 있다.
 function recordPush(info) {
   return caches.open('bus-diag').then(function (c) {
-    return c.put('last-push', new Response(JSON.stringify(info), { headers: { 'Content-Type': 'application/json' } }));
+    var save = c.put('last-push', new Response(JSON.stringify(info), { headers: { 'Content-Type': 'application/json' } }));
+    // 지연 측정용 대기 목록: 학생이 앱을 열 때 서버로 올라가고 비워진다(Feedback.gs reportPushDelay)
+    var queue = c.match('delay-queue')
+      .then(function (r) { return r ? r.json() : []; })
+      .catch(function () { return []; })
+      .then(function (list) {
+        if (!info.sentAt) return null;                       // 발송 시각이 없으면 비교 불가
+        list.push({ sentAt: info.sentAt, receivedAt: info.at, shown: info.shown !== false });
+        return c.put('delay-queue', new Response(JSON.stringify(list.slice(-20)),
+          { headers: { 'Content-Type': 'application/json' } }));
+      });
+    return Promise.all([save, queue]);
   }).catch(function () {});
 }
 
@@ -38,9 +49,9 @@ self.addEventListener('push', function (e) {
       vibrate: [200, 100, 200],
       data: { url: n.url || './' }
     }).then(function () {
-      return recordPush({ at: at, shown: true, title: n.title || '' });
+      return recordPush({ at: at, shown: true, title: n.title || '', sentAt: Number(n.sentAt) || 0 });
     }).catch(function (err) {
-      return recordPush({ at: at, shown: false, error: String((err && err.message) || err) });
+      return recordPush({ at: at, shown: false, error: String((err && err.message) || err), sentAt: Number(n.sentAt) || 0 });
     })
   );
 });
